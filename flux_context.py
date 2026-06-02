@@ -39,7 +39,7 @@ class FluxGenerator:
        self.pipe = FluxPipeline.from_pretrained(
             MODEL_ID,
             torch_dtype=self.dtype,
-            use_safetensors=True,
+            use_safetensors=False,
             low_cpu_mem_usage=True,
             token=os.environ["HF_TOKEN"],
         ).to(self.device)
