@@ -11,9 +11,11 @@ import flux.util as flux_util
 flux_util.configs["flux-dev"].ckpt_path = os.path.expanduser("~/FLUX.1-dev/flux1-dev.safetensors")
 flux_util.configs["flux-dev"].ae_path   = os.path.expanduser("~/FLUX.1-dev/ae.safetensors")
 
-from flux.util import load_flow_model, load_ae
+from flux.util import load_ae
+from flux.model import Flux
 from flux.sampling import denoise, get_noise, get_schedule, unpack
 from pulid.pipeline_flux import PuLIDPipeline
+from safetensors.torch import load_file as load_sft
 
 PULID_PATH = os.path.expanduser("~/pulid_weights/pulid_flux_v0.9.1.safetensors")
 
@@ -43,7 +45,19 @@ class Stage2Processor:
 
     def __init__(self):
         print("[Stage2] Loading FLUX model...")
-        self.model = load_flow_model("flux-dev", device=DEVICE)
+        ckpt_path = flux_util.configs["flux-dev"].ckpt_path
+
+        # Init on meta device (zero VRAM), load checkpoint to CPU,
+        # then move to GPU — avoids double-GPU allocation (46GB peak → 23GB peak).
+        with torch.device("meta"):
+            self.model = Flux(flux_util.configs["flux-dev"].params)
+
+        sd = load_sft(ckpt_path, device="cpu")
+        self.model.load_state_dict(sd, strict=False, assign=True)
+        del sd
+        gc.collect()
+
+        self.model = self.model.to(dtype=DTYPE, device=DEVICE)
         self.model.eval()
 
         print("[Stage2] Loading VAE...")
