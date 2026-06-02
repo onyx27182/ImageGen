@@ -1,0 +1,47 @@
+# model weights & large assets
+flux/
+FLUX.1-dev/
+PuLID-FLUX/
+clip-vit-large-patch14/
+eva_clip_weights/
+insightface/
+pulid_weights/
+xflux_text_encoders/
+Dolphin-X1-Trinity-Nano/
+models/
+embeds/
+
+# outputs
+outputs/
+
+# python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# user dotfiles & shell
+.bash_history
+.bash_logout
+.bashrc
+.profile
+.hushlogin
+.vimrc
+.wget-hsts
+.npmrc
+
+# editor & tools
+.vscode-server/
+.copilot/
+.claude.json
+.claude/
+.config/
+.cache/
+.local/
+.npm/
+.npm-global/
+.dotnet/
+.triton/
+.thunder/
+.ssh/
