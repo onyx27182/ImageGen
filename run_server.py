@@ -17,7 +17,7 @@ from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
 from dolphin.dolphin_mgr import DolphinMgr
 from llm_mgr import LLMMgr
-
+from qwen_angle.qwen_angles import QWenAngles
 import uvicorn
 
 from stage1_processor import Stage1Processor
@@ -29,7 +29,7 @@ if "API_KEY" not in os.environ:
 
 print("Loading Stage1 processor...")
 stage1 = Stage1Processor()
-dolphin = DolphinMgr()
+# dolphin = DolphinMgr()
 
 
 llm_mgr = LLMMgr()
@@ -42,6 +42,18 @@ stage2 = Stage2Processor()
 print("Loading Stage3 skin refiner...")
 from stage3_processor import Stage3Processor
 stage3 = Stage3Processor()
+
+
+print("Loading QwenAngles...")
+qwen_angles = QWenAngles()
+
+
+# ── request/response models ────────────────────────────────────────────────
+class ChangeViewRequest(BaseModel)
+    image_b64: str 
+    prompt: str
+   
+
 
 
 
@@ -162,6 +174,38 @@ def generate(req: GenerateRequest, x_api_key: str = Header(...)):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Stage3 failed: {e}")
+
+    gc.collect()
+    torch.cuda.empty_cache()
+
+    buf = BytesIO()
+    image.save(buf, format="PNG")
+    image_b64 = base64.b64encode(buf.getvalue()).decode()
+
+    return GenerateResponse(status="ok", image=image_b64)
+
+@app.post("/change_view", response_model=GenerateResponse)
+def generate(req: ChangeViewRequest, x_api_key: str = Header(...)):
+    print("changing_view!")
+    if x_api_key != os.environ["API_KEY"]:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    
+    if not req.image_b64:
+        raise HTTPException(status_code=400, detail="image_b64 required when use_reference=True")
+    
+    try:
+        print("decoding image!")
+        image_bytes = base64.b64decode(req.image_b64)
+        id_image = np.array(Image.open(BytesIO(image_bytes)).convert("RGB"))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid image: {e}")
+    
+    try:
+        print("STARTING STAGE1")
+        image = qwen_angles.process(id_image, req.prompt)
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Stage1 failed: {e}")
 
     gc.collect()
     torch.cuda.empty_cache()
