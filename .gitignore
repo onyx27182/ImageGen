@@ -218,18 +218,11 @@ __marimo__/
 .streamlit/secrets.toml
 
 # model weights & large assets
-flux/
-FLUX.1-dev/
-PuLID-FLUX/
-clip-vit-large-patch14/
-eva_clip_weights/
-insightface/
-pulid_weights/
-xflux_text_encoders/
-Dolphin-X1-Trinity-Nano/
-models/
-embeds/
-outputs/
+*.safetensors
+*.ckpt
+*.pt
+*.pth
+*.bin
 
 # user dotfiles
 .bash_history
