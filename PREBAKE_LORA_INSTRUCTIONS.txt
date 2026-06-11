@@ -1,0 +1,58 @@
+PRE-BAKING THE QWEN ANGLES LORA INTO THE BASE MODEL
+=====================================================
+
+PURPOSE
+-------
+Eliminates the 10-15 minute startup cost caused by load_lora_weights().
+After pre-baking, the server loads the fused model directly in seconds.
+This is a ONE-TIME operation. Run it once, then update the server config.
+
+
+STEP 1 — Run the merge script (once)
+--------------------------------------
+Run this from /home/ubuntu:
+
+    python3 prebake_lora.py
+
+This will:
+  - Load the base Qwen Image Edit model
+  - Load the angles LoRA
+  - Fuse the LoRA weights into the base model
+  - Save the merged model to: models/models/qwen_angles_fused
+
+Expect it to take 10-15 minutes (same as current startup) — but only this once.
+
+
+STEP 2 — Update qwen_angles.py
+--------------------------------
+Change the model directory from:
+    self._model_dir = os.path.join(project_root, 'models/models', 'qwen_image_edit')
+
+To:
+    self._model_dir = os.path.join(project_root, 'models/models', 'qwen_angles_fused')
+
+And remove these lines from __init__:
+    if not os.path.exists(lora_path):
+        raise FileNotFoundError(...)
+    else:
+        print("[INIT] QWenAngles: loading LoRA weights...")
+        self._pipe.load_lora_weights(self._lora_dir, weight_name=self._LORA_FILE)
+        torch.cuda.empty_cache()
+        print("[INIT] QWenAngles ready.")
+
+Replace with just:
+    print("[INIT] QWenAngles ready.")
+
+
+STEP 3 — Restart the server
+-----------------------------
+The server will now load in seconds instead of minutes.
+
+
+NOTES
+-----
+- The fused model directory (qwen_angles_fused/) will be ~same size as the original
+- The original model (qwen_image_edit/) and LoRA file can be kept as backup
+- diffusers 0.38.0+ required (already installed)
+- If you need a different lora_scale than 1.0, re-run the merge script with the desired value
+- Do NOT call load_lora_weights() after loading the fused model — the LoRA is already baked in

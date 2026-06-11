@@ -23,8 +23,7 @@ class QWenAngles:
             self._pipe = QwenImageEditPlusPipeline.from_pretrained(
                 self._model_dir,
                 torch_dtype=torch.bfloat16,
-            )
-            self._pipe.enable_model_cpu_offload()
+            ).to("cuda")
 
             if not os.path.exists(lora_path):
                 raise FileNotFoundError(
@@ -36,6 +35,7 @@ class QWenAngles:
             else:
                 print("[INIT] QWenAngles: loading LoRA weights...")
                 self._pipe.load_lora_weights(self._lora_dir, weight_name=self._LORA_FILE)
+                torch.cuda.empty_cache()
                 print("[INIT] QWenAngles ready.")
 
         except Exception as e:
@@ -68,11 +68,15 @@ class QWenAngles:
 
         pil_in = Image.fromarray(image_rgb)
 
-        result = self._pipe(
-            image=pil_in,
-            prompt=prompt,
-            num_inference_steps=50,
-            true_cfg_scale=4.0
-        ).images[0]
-
+        result = None
+        try:
+            result = self._pipe(
+                image=pil_in,
+                prompt=prompt,
+                num_inference_steps=28,
+                true_cfg_scale=1.0,
+            ).images[0]
+        except Exception as e:
+            print(f"ERROR: angle generation failed: {e}")
+            raise RuntimeError(f"ERROR: angle generation failed: {e}") from e
         return result

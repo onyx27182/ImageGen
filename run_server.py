@@ -28,20 +28,20 @@ if "API_KEY" not in os.environ:
     raise SystemExit(1)
 
 print("Loading Stage1 processor...")
-stage1 = Stage1Processor()
-# dolphin = DolphinMgr()
+#@PB stage1 = Stage1Processor()
+#Do NOT USE dolphin = DolphinMgr()
 
 
-llm_mgr = LLMMgr()
+#@PB llm_mgr = LLMMgr()
 app = FastAPI()
 
 print("Loading Stage2 denoiser...")
-from stage2_processor import Stage2Processor
-stage2 = Stage2Processor()
+#@PBfrom stage2_processor import Stage2Processor
+#@PBstage2 = Stage2Processor()
 
 print("Loading Stage3 skin refiner...")
 from stage3_processor import Stage3Processor
-stage3 = Stage3Processor()
+#@PBstage3 = Stage3Processor()
 
 
 print("Loading QwenAngles...")
@@ -49,7 +49,7 @@ qwen_angles = QWenAngles()
 
 
 # ── request/response models ────────────────────────────────────────────────
-class ChangeViewRequest(BaseModel)
+class ChangeViewRequest(BaseModel):
     image_b64: str 
     prompt: str
    
@@ -203,7 +203,7 @@ def generate(req: ChangeViewRequest, x_api_key: str = Header(...)):
     try:
         print("STARTING STAGE1")
         image = qwen_angles.process(id_image, req.prompt)
-        
+        print("Image created successfully!")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Stage1 failed: {e}")
 
