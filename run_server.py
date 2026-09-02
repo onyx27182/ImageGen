@@ -126,21 +126,29 @@ class GenerateRequest(BaseModel):
     image_b64: str | None = None
     file_hash: str = ""
     prompt: str
-    height: int = 768
-    width: int = 768
+    height: int = 1024          # final output size; FLUX is trained at 1024
+    width: int = 1024
     guidance_scale: float = 4.0
     num_inference_steps: int = 28
     seed: int = 0
     pulid_weight: float = 1.0
-    num_start_step: int = 0
+    num_start_step: int = 4     # PuLID doc: ~4 for photoreal, 0-1 for stylised
     true_cfg: float = 1.0
-    refine_denoise: float = 0.20
-    refine_steps: int = 16
-    refine_guidance: float = 3.0
+    # Stage 3 — tiled refine (runs on the upscaled image, before the downscale)
+    refine_denoise: float = 0.25
+    refine_steps: int = 24
+    refine_guidance: float = 2.5
     refine_pulid_weight: float = 0.0
     refine_tile_size: int = 1024
     refine_tile_overlap: int = 96
-    upscale: int = 2
+    upscale: int = 1           # ESRGAN factor before refine; 1 = none, 2 = supersample
+    # Stage 3 — face-detail pass (ADetailer-style; the LAST diffusion step)
+    face_detail: bool = True
+    face_denoise: float = 0.40
+    face_pulid_weight: float | None = None   # None => 0.5 on reference calls, else 0
+    face_pad: float = 0.40
+    face_steps: int = 30
+    face_guidance: float = 3.0
 
 class GenerateResponse(BaseModel):
     status: str
@@ -201,9 +209,12 @@ def generate(req: GenerateRequest, x_api_key: str = Header(...)):
     pulid_used = req.use_reference
     use_srpo   = (not pulid_used) if req.use_srpo is None else bool(req.use_srpo)
     use_refine = True if req.use_refine_step is None else bool(req.use_refine_step)
+    face_pw    = (0.5 if pulid_used else 0.0) if req.face_pulid_weight is None \
+                 else float(req.face_pulid_weight)
     print(f"[generate] pulid_used={pulid_used}  "
           f"use_srpo={use_srpo} (flag={req.use_srpo})  "
-          f"use_refine={use_refine} (flag={req.use_refine_step})")
+          f"use_refine={use_refine} (flag={req.use_refine_step})  "
+          f"face_detail={req.face_detail} face_pulid_weight={face_pw}")
 
     try:
         with _model_lock:
@@ -211,8 +222,11 @@ def generate(req: GenerateRequest, x_api_key: str = Header(...)):
             _ensure_stages_loaded()
 
             print("STARTING STAGE1")
-            gen_height = req.height // 2 if (req.height == 1920 and req.width == 1080) else req.height
-            gen_width  = req.width  // 2 if (req.height == 1920 and req.width == 1080) else req.width
+            is_hd = (req.height == 1920 and req.width == 1080)
+            gen_height = req.height // 2 if is_hd else req.height
+            gen_width  = req.width  // 2 if is_hd else req.width
+            # HD is generated at half size, so it must be upscaled to reach target
+            upscale = max(req.upscale, 2) if is_hd else req.upscale
             embeddings = stage1.process(
                 id_image=id_image,
                 prompt=req.prompt,
@@ -243,7 +257,14 @@ def generate(req: GenerateRequest, x_api_key: str = Header(...)):
             embeddings["refine_pulid_weight"]   = req.refine_pulid_weight
             embeddings["refine_tile_size"]      = req.refine_tile_size
             embeddings["refine_tile_overlap"]   = req.refine_tile_overlap
-            embeddings["upscale"]               = req.upscale
+            embeddings["upscale"]               = upscale
+
+            embeddings["face_detail"]           = req.face_detail
+            embeddings["face_denoise"]          = req.face_denoise
+            embeddings["face_pulid_weight"]     = face_pw
+            embeddings["face_pad"]              = req.face_pad
+            embeddings["face_steps"]            = req.face_steps
+            embeddings["face_guidance"]         = req.face_guidance
 
             image = stage3.process(
                 init_image=image,
