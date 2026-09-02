@@ -54,7 +54,7 @@ All endpoints require the `X-API-KEY` header.
 | `seed`                | int           | `0`     | RNG seed. |
 | `pulid_weight`        | float         | `1.0`   | Identity strength (only used on a reference call). |
 | `num_start_step`      | int           | `0`     | Step at which PuLID conditioning starts. |
-| `true_cfg`            | float         | `1.0`   | `>1.0` enables true CFG with a negative pass. |
+| `true_cfg`            | float         | `1.0`   | **Leave at `1.0`.** True CFG needs negative conditioning, which Stage 2 does not currently build — values `>1.0` will fail. |
 | `refine_denoise`      | float         | `0.20`  | Refine SDEdit strength (fraction of the trajectory re-noised). `0` disables refine. |
 | `refine_steps`        | int           | `16`    | Refine schedule length. |
 | `refine_guidance`     | float         | `3.0`   | Refine guidance. |
@@ -148,3 +148,71 @@ Refine runs when **all** of these hold:
 Refine uses whichever checkpoint Stage 2 just ran with. Set
 `refine_pulid_weight > 0` to carry identity conditioning into the refine pass on
 a reference call.
+
+---
+
+## Quality & tuning knobs
+
+Every knob below is a field on the `POST /generate` body. Defaults are tuned for
+a good general result; adjust from there.
+
+### Pick the pipeline
+
+| Knob | Default | Raise / set it to… | Lower / unset it to… |
+|------|---------|--------------------|----------------------|
+| `use_srpo` | auto (`true` unless a reference image) | `true` — force the SRPO fine-tune: more realistic skin, pores, lighting. Best for non-face or loose-likeness work. | `false` — force vanilla flux1-dev: required for strong PuLID likeness; cleaner/"flatter" look. |
+| `use_refine_step` | `true` | keep on — adds a diffusion pass after upscaling (~2× measured Laplacian sharpness at `refine_denoise` 0.4). | `false` — skip it: faster, ESRGAN-only, no risk of refine drift. |
+| `upscale` | `2` | `2`–`4` for more output resolution / ESRGAN detail. | `0` — skip upscaling entirely (refine then runs at native size). |
+
+### Base generation (Stage 2)
+
+| Knob | Default | Higher = | Lower = | Typical range |
+|------|---------|----------|---------|---------------|
+| `num_inference_steps` | `28` | more detail and convergence, slower | faster, softer / less coherent | `20`–`40` |
+| `guidance_scale` | `4.0` | follows the prompt harder, can look contrasty / "AI" | more natural and varied, may ignore prompt details | `3.0`–`6.0` |
+| `seed` | `0` | — (just changes the sample) | — | any int |
+| `height` / `width` | `768` | larger native canvas, much slower, more VRAM | faster | `768`–`1024`; `1920x1080` is generated at half then upscaled |
+
+### Identity / PuLID (reference calls only)
+
+| Knob | Default | Higher = | Lower = | Typical range |
+|------|---------|----------|---------|---------------|
+| `pulid_weight` | `1.0` | stronger likeness, can fight the prompt and look pasted | more prompt freedom, weaker likeness | `0.7`–`1.2` |
+| `num_start_step` | `0` | identity applied only after N steps → more natural pose/lighting, looser likeness | identity locked from step 0 → maximal likeness | `0`–`4` |
+| `true_cfg` | `1.0` | **do not change** — not wired through Stage 2 | — | `1.0` only |
+
+### Refine pass (Stage 3)
+
+Only used when the refine step runs (see above).
+
+| Knob | Default | Higher = | Lower = | Typical range |
+|------|---------|----------|---------|---------------|
+| `refine_denoise` | `0.20` | sharper and more re-detailed, but drifts further from the Stage 2 image (identity, composition) | subtle polish, stays faithful | `0.15`–`0.45` |
+| `refine_steps` | `16` | smoother refine trajectory, slower | faster, coarser | `12`–`24` |
+| `refine_guidance` | `3.0` | more prompt influence during refine | lets refine follow the existing image | `2.0`–`4.0` |
+| `refine_pulid_weight` | `0.0` | re-asserts the reference identity during refine — use when `refine_denoise` is high enough to erode likeness | `0.0` = refine ignores identity | `0.0`, or `0.3`–`0.8` if needed |
+| `refine_tile_size` | `1024` | fewer, larger tiles: more global coherence, more VRAM per tile | more small tiles: less VRAM, more seams to blend | `768`–`1280` (÷16) |
+| `refine_tile_overlap` | `96` | more overlap: smoother tile blending, slower (more tiles) | less overlap: faster, risk of visible seams | `64`–`128` |
+
+### Rules of thumb
+
+- **Face looks pasted on / wrong lighting** → lower `pulid_weight` to ~0.8, or
+  raise `num_start_step` to 2–4.
+- **Face likeness lost after refine** → lower `refine_denoise`, or set
+  `refine_pulid_weight` to ~0.5.
+- **Output too soft** → `use_refine_step: true` and `refine_denoise` ~0.3, or
+  raise `num_inference_steps`.
+- **Skin looks plasticky** → `use_srpo: true` (drop the reference image, or
+  accept weaker likeness).
+- **Visible grid seams after refine** → raise `refine_tile_overlap`, or raise
+  `refine_tile_size` so the image fits in one tile.
+- **Too slow** → `use_refine_step: false`, drop `num_inference_steps` to ~22,
+  keep resolution at 768.
+
+## Other endpoints
+
+`POST /change_view` — body `{ "image_b64": ..., "prompts": [...] }`, no tuning
+knobs; streams one NDJSON line per prompt.
+
+`POST /dolphin` — body `{ "prompt": ..., "max_new_tokens": 512 }`;
+`max_new_tokens` is the only knob.
