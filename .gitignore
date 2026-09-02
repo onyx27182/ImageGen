@@ -223,6 +223,23 @@ __marimo__/
 *.pt
 *.pth
 *.bin
+*.onnx
+*.gguf
+*.h5
+*.msgpack
+
+# downloaded model repos / checkpoints / generated output (never commit)
+models/
+outputs/
+flux/
+PuLID-FLUX/
+insightface/
+clip-vit-large-patch14/
+xflux_text_encoders/
+Dolphin-X1-Trinity-Nano/
+FLUX.1-dev/
+qwen_image_edit/
+*_image_edit/
 
 # user dotfiles
 .bash_history
