@@ -28,7 +28,8 @@ class FaceProcessor:
         self.DEVICE = DEVICE
         self.DTYPE = DTYPE
 
-        self._file_embeddings : dict[str, torch.Tensor] = {}
+        self._file_embeddings: dict[str, torch.Tensor] = {}
+        self._file_embeddings_max = 8
 
         print("[FaceProcessor] Loading EVA CLIP...")
         eva_clip, _, _ = create_model_and_transforms(
@@ -193,6 +194,9 @@ class FaceProcessor:
             print("id_embeddings mean abs:", id_embeddings.abs().mean().item())
             print("id_embeddings min/max:", id_embeddings.min().item(), id_embeddings.max().item())
           
+            if len(self._file_embeddings) >= self._file_embeddings_max:
+                oldest = next(iter(self._file_embeddings))
+                del self._file_embeddings[oldest]
             self._file_embeddings[filehash_cache_key] = id_embeddings
 
         return id_embeddings

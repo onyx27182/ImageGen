@@ -19,11 +19,8 @@ from safetensors.torch import load_file as load_sft
 
 PULID_PATH = os.path.expanduser("~/pulid_weights/pulid_flux_v0.9.1.safetensors")
 
-DEVICE     = "cuda"
-DTYPE      = torch.bfloat16
-ID_WEIGHT  = 1.0
-START_STEP = 0
-TRUE_CFG   = 1.0
+DEVICE = "cuda"
+DTYPE  = torch.bfloat16
 
 
 def make_img_ids(img):
@@ -64,18 +61,45 @@ class Stage2Processor:
         self.ae = load_ae("flux-dev", device=DEVICE)
         self.ae.eval()
 
-        print("[Stage2] Loading PuLID weights...")
-        self.pulid = PuLIDPipeline(self.model, DEVICE, weight_dtype=DTYPE)
-        self.pulid.load_pretrain(pretrain_path=PULID_PATH)
+        self.pulid = None
 
         print("[Stage2] Ready.")
+
+    def to_cpu(self):
+        # self.model carries pulid_ca as a registered submodule — moves with it
+        self.model.to("cpu")
+        self.ae.to("cpu")
+        if self.pulid is not None:
+            self.pulid.pulid_encoder.to("cpu")
+            self.pulid.clip_vision_model.to("cpu")
+            self.pulid.face_helper.face_det.to("cpu")
+            self.pulid.face_helper.face_parse.to("cpu")
+        gc.collect()
+        torch.cuda.empty_cache()
+
+    def to_gpu(self):
+        self.model.to(DEVICE)
+        self.ae.to(DEVICE)
+        if self.pulid is not None:
+            self.pulid.pulid_encoder.to(DEVICE)
+            self.pulid.clip_vision_model.to(DEVICE)
+            self.pulid.face_helper.face_det.to(DEVICE)
+            self.pulid.face_helper.face_parse.to(DEVICE)
 
     def process(self, embeddings: dict) -> Image.Image:
         txt           = embeddings["txt"].to(DEVICE, dtype=DTYPE)
         vec           = embeddings["vec"].to(DEVICE, dtype=DTYPE)
         txt_ids       = embeddings["txt_ids"].to(DEVICE)
         raw_id = embeddings["id_embeddings"]
-        id_embeddings = raw_id.to(DEVICE, dtype=DTYPE) if raw_id is not None else None
+        if raw_id is not None:
+            if self.pulid is None:
+                print("[Stage2] Loading PuLID weights...")
+                self.pulid = PuLIDPipeline(self.model, DEVICE, weight_dtype=DTYPE)
+                self.pulid.load_pretrain(pretrain_path=PULID_PATH)
+                print("[Stage2] PuLID ready.")
+            id_embeddings = raw_id.to(DEVICE, dtype=DTYPE)
+        else:
+            id_embeddings = None
         height        = int(embeddings["height"])
         width         = int(embeddings["width"])
         guidance      = float(embeddings["guidance_scale"])
@@ -106,6 +130,7 @@ class Stage2Processor:
 
         noise = get_noise(1, height, width, device=DEVICE, dtype=DTYPE, seed=seed)
         img, img_ids = make_img_ids(noise)
+        del noise
 
         inp = {
             "img":     img,
@@ -145,9 +170,9 @@ class Stage2Processor:
 
         image = Image.fromarray((127.5 * (x + 1.0)).cpu().byte().numpy())
 
-        del x, img, img_ids, txt, txt_ids, vec, id_embeddings
+        del x, inp, img, img_ids, txt, txt_ids, vec, id_embeddings
         torch.cuda.empty_cache()
         gc.collect()
 
-        print(f"[Stage2] returning inage")
+        print("[Stage2] returning image")
         return image

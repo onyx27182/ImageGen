@@ -1,5 +1,4 @@
 import os
-import cv2
 import numpy as np
 import torch
 from PIL import Image
@@ -23,7 +22,8 @@ class QWenAngles:
             self._pipe = QwenImageEditPlusPipeline.from_pretrained(
                 self._model_dir,
                 torch_dtype=torch.bfloat16,
-            ).to("cuda")
+                device_map="balanced",
+            )
 
             if not os.path.exists(lora_path):
                 raise FileNotFoundError(
@@ -44,6 +44,16 @@ class QWenAngles:
             traceback.print_exc()
             self._pipe = None
 
+    def to_gpu(self):
+        if self._pipe is not None:
+            self._pipe.to("cuda")
+
+    def to_cpu(self):
+        if self._pipe is not None:
+            self._pipe.reset_device_map()
+            self._pipe.to("cpu")
+            torch.cuda.empty_cache()
+
     def process(self, image_rgb: np.ndarray, prompt: str) -> Image.Image:
         """
         Apply a camera-angle change to the image using the LoRA prompt.
@@ -61,14 +71,13 @@ class QWenAngles:
         Look up      : "<sks> front view high-angle shot medium shot"
         Look down    : "<sks> front view low-angle shot medium shot"
 
-        Returns the original image unchanged if the pipe is unavailable.
+        Raises RuntimeError if the pipe failed to initialise.
         """
         if self._pipe is None:
             raise RuntimeError("QWenAngles pipe not loaded — check initialisation errors above.")
 
         pil_in = Image.fromarray(image_rgb)
 
-        result = None
         try:
             result = self._pipe(
                 image=pil_in,

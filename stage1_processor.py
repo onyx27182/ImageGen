@@ -12,30 +12,12 @@ import sys
 import numpy as np
 import torch
 from PIL import Image
-"""
-from torchvision.transforms import functional as TF
-from torchvision import transforms
-from facexlib.parsing import init_parsing_model
-from facexlib.utils.face_restoration_helper import FaceRestoreHelper
-from insightface.app import FaceAnalysis
-from safetensors.torch import load_file
-"""
 sys.path.insert(0, os.path.expanduser("~/PuLID-FLUX"))
-
-"""
-from eva_clip import create_model_and_transforms
-from pulid.encoders_transformer import IDFormer
-"""
 from flux.sampling import get_noise, prepare
 from flux.modules.conditioner import HFEmbedder
 
-# ── paths ──────────────────────────────────────────────────────────────────
-PULID_PATH      = os.path.expanduser("~/pulid_weights/pulid_flux_v0.9.1.safetensors")
-INSIGHTFACE_DIR = os.path.expanduser("~/insightface")
-
-DTYPE             = torch.bfloat16
-DEVICE            = "cuda"
-FACE_APP_PROVIDER = "CUDAExecutionProvider"
+DTYPE  = torch.bfloat16
+DEVICE = "cuda"
 
 class Stage1Processor:
 
@@ -63,6 +45,28 @@ class Stage1Processor:
 
         print("[Stage1] Ready.")
 
+    def to_cpu(self):
+        self.t5.to("cpu")
+        self.clip.to("cpu")
+        if self._face_processor is not None:
+            fp = self._face_processor
+            fp.eva_clip.to("cpu")
+            fp.id_encoder.to("cpu")
+            fp.face_helper.face_det.to("cpu")
+            fp.face_helper.face_parse.to("cpu")
+        gc.collect()
+        torch.cuda.empty_cache()
+
+    def to_gpu(self):
+        self.t5.to(DEVICE)
+        self.clip.to(DEVICE)
+        if self._face_processor is not None:
+            fp = self._face_processor
+            fp.eva_clip.to(DEVICE)
+            fp.id_encoder.to(DEVICE)
+            fp.face_helper.face_det.to(DEVICE)
+            fp.face_helper.face_parse.to(DEVICE)
+
     def process(
         self,
         id_image: np.ndarray | None,
@@ -81,7 +85,7 @@ class Stage1Processor:
         txt     = inp["txt"]
         txt_ids = inp["txt_ids"]
         vec     = inp["vec"]
-        del noise
+        del noise, inp
 
  
         # ── process face image ─────────────────────────────────────────────
