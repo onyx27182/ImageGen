@@ -153,46 +153,120 @@ a reference call.
 
 ## Quality & tuning knobs
 
-Every knob below is a field on the `POST /generate` body. Defaults are tuned for
-a good general result; adjust from there.
+Every knob below is a field on the `POST /generate` body. Each entry gives the
+**accepted range**, the **default**, and what specific values do. Defaults are
+tuned for a good general result; adjust one knob at a time.
 
-### Pick the pipeline
+### Pipeline selection
 
-| Knob | Default | Raise / set it to… | Lower / unset it to… |
-|------|---------|--------------------|----------------------|
-| `use_srpo` | auto (`true` unless a reference image) | `true` — force the SRPO fine-tune: more realistic skin, pores, lighting. Best for non-face or loose-likeness work. | `false` — force vanilla flux1-dev: required for strong PuLID likeness; cleaner/"flatter" look. |
-| `use_refine_step` | `true` | keep on — adds a diffusion pass after upscaling (~2× measured Laplacian sharpness at `refine_denoise` 0.4). | `false` — skip it: faster, ESRGAN-only, no risk of refine drift. |
-| `upscale` | `2` | `2`–`4` for more output resolution / ESRGAN detail. | `0` — skip upscaling entirely (refine then runs at native size). |
+**`use_srpo`** — `true` / `false` / omit &nbsp;·&nbsp; default: omit (auto)
+- **omit** → auto: SRPO when there is no reference image, flux1-dev when there is.
+- **`true`** → always SRPO. Realistic skin, pores, micro-contrast. Use for
+  non-face images or when a loose likeness is acceptable.
+- **`false`** → always flux1-dev. Required for a strong PuLID likeness; look is
+  cleaner and slightly flatter.
 
-### Base generation (Stage 2)
+**`use_refine_step`** — `true` / `false` / omit &nbsp;·&nbsp; default: omit (on)
+- **omit / `true`** → run the Stage 3 diffusion refine after upscaling
+  (~2× Laplacian sharpness at `refine_denoise` 0.4). Adds ~5–15 s.
+- **`false`** → ESRGAN upscale only. Faster, and nothing can drift.
 
-| Knob | Default | Higher = | Lower = | Typical range |
-|------|---------|----------|---------|---------------|
-| `num_inference_steps` | `28` | more detail and convergence, slower | faster, softer / less coherent | `20`–`40` |
-| `guidance_scale` | `4.0` | follows the prompt harder, can look contrasty / "AI" | more natural and varied, may ignore prompt details | `3.0`–`6.0` |
-| `seed` | `0` | — (just changes the sample) | — | any int |
-| `height` / `width` | `768` | larger native canvas, much slower, more VRAM | faster | `768`–`1024`; `1920x1080` is generated at half then upscaled |
+**`upscale`** — integer, use `0` or `2`–`4` &nbsp;·&nbsp; default: `2`
+- **`0`** → no upscaling; refine (if on) runs at the Stage 2 native size.
+- **`2`** → ×2 output (default). Good detail/size balance.
+- **`3`–`4`** → larger output, more ESRGAN texture; `4` is the model's native
+  factor. Slower, more VRAM in refine.
+- **`>4`** → not supported by the ESRGAN model; extra scale is just a resize and
+  looks soft. Don't.
 
-### Identity / PuLID (reference calls only)
+### Base generation — Stage 2
 
-| Knob | Default | Higher = | Lower = | Typical range |
-|------|---------|----------|---------|---------------|
-| `pulid_weight` | `1.0` | stronger likeness, can fight the prompt and look pasted | more prompt freedom, weaker likeness | `0.7`–`1.2` |
-| `num_start_step` | `0` | identity applied only after N steps → more natural pose/lighting, looser likeness | identity locked from step 0 → maximal likeness | `0`–`4` |
-| `true_cfg` | `1.0` | **do not change** — not wired through Stage 2 | — | `1.0` only |
+**`num_inference_steps`** — integer &nbsp;·&nbsp; default: `28`
+- **`< 15`** → under-denoised: soft, muddy, incoherent.
+- **`20`–`28`** → normal working range; `28` is the sweet spot.
+- **`30`–`40`** → marginally crisper, linear cost increase.
+- **`> 40`** → no visible benefit.
 
-### Refine pass (Stage 3)
+**`guidance_scale`** — float &nbsp;·&nbsp; default: `4.0`
+- **`1.5`–`2.5`** → very loose; dreamy, washed-out, ignores prompt details.
+- **`3.5`–`4.5`** → balanced prompt adherence and natural look (default `4.0`).
+- **`5`–`7`** → follows the prompt hard; rising contrast/saturation, "AI" sheen.
+- **`> 8`** → over-saturated, burnt highlights, artifacts.
 
-Only used when the refine step runs (see above).
+**`seed`** — non-negative integer &nbsp;·&nbsp; default: `0`
+- Same seed + identical params ⇒ identical image. Change it to get a different
+  sample; nothing else about quality changes.
 
-| Knob | Default | Higher = | Lower = | Typical range |
-|------|---------|----------|---------|---------------|
-| `refine_denoise` | `0.20` | sharper and more re-detailed, but drifts further from the Stage 2 image (identity, composition) | subtle polish, stays faithful | `0.15`–`0.45` |
-| `refine_steps` | `16` | smoother refine trajectory, slower | faster, coarser | `12`–`24` |
-| `refine_guidance` | `3.0` | more prompt influence during refine | lets refine follow the existing image | `2.0`–`4.0` |
-| `refine_pulid_weight` | `0.0` | re-asserts the reference identity during refine — use when `refine_denoise` is high enough to erode likeness | `0.0` = refine ignores identity | `0.0`, or `0.3`–`0.8` if needed |
-| `refine_tile_size` | `1024` | fewer, larger tiles: more global coherence, more VRAM per tile | more small tiles: less VRAM, more seams to blend | `768`–`1280` (÷16) |
-| `refine_tile_overlap` | `96` | more overlap: smoother tile blending, slower (more tiles) | less overlap: faster, risk of visible seams | `64`–`128` |
+**`height` / `width`** — integer, multiples of 16 &nbsp;·&nbsp; default: `768`
+- **`512`** → fast, lower fidelity, weaker composition.
+- **`768`** → default; reliable for FLUX.
+- **`1024`** → sharper, better structure; ~1.8× slower, more VRAM.
+- **`1152`–`1536`** → diminishing returns, slow, OOM risk.
+- **`1920×1080`** → special-cased: generated at `960×540`, then upscaled.
+- Non-multiples of 16 are rounded down.
+
+### Identity / PuLID — reference calls only
+
+**`pulid_weight`** — float, effective `0.0`–`1.5` &nbsp;·&nbsp; default: `1.0`
+- **`0.0`** → identity off (use `use_reference: false` instead).
+- **`0.5`–`0.7`** → subtle resemblance, full prompt freedom.
+- **`0.8`–`1.0`** → strong likeness, still flexible (default `1.0`).
+- **`1.1`–`1.3`** → maximal likeness; can fight the prompt, waxy skin, "pasted"
+  look.
+- **`> 1.3`** → usually degrades the image.
+
+**`num_start_step`** — integer `0`–`num_inference_steps` &nbsp;·&nbsp; default: `0`
+- **`0`** → identity applied from the first step: tightest likeness, but pose and
+  lighting are pulled toward the reference photo.
+- **`1`–`3`** → composition forms first, then identity: more natural result,
+  likeness slightly looser.
+- **`4`–`6`** → noticeably weaker likeness.
+- **`> 6`** → identity barely takes effect.
+
+**`true_cfg`** — **keep at `1.0`** &nbsp;·&nbsp; default: `1.0`
+- Negative conditioning is not built by Stage 2, so any value `> 1.0` errors.
+
+### Refine pass — Stage 3
+
+Only applied when the refine step runs. Actual Euler steps executed ≈
+`round(refine_steps × refine_denoise)`.
+
+**`refine_denoise`** — float `0.0`–`1.0` &nbsp;·&nbsp; default: `0.20`
+- **`0.0`** → refine disabled (ESRGAN only).
+- **`0.1`–`0.2`** → gentle polish; output stays faithful to Stage 2 (default `0.20`).
+- **`0.3`–`0.4`** → real re-detailing (skin, hair, fabric); mild drift in
+  identity/composition. Best quality/faithfulness trade for portraits ≈ `0.35`.
+- **`0.5`–`0.6`** → strong reinterpretation; expect identity and layout to move.
+- **`> 0.7`** → effectively regenerates each tile from the prompt.
+
+**`refine_steps`** — integer &nbsp;·&nbsp; default: `16`
+- **`8`–`12`** → faster, slightly coarser refine.
+- **`16`** → default.
+- **`20`–`24`** → smoother, marginal quality gain.
+- **`> 24`** → not worth the time.
+
+**`refine_guidance`** — float &nbsp;·&nbsp; default: `3.0`
+- **`1.5`–`2.5`** → refine mostly follows the existing image.
+- **`3.0`–`3.5`** → balanced (default `3.0`).
+- **`> 4`** → prompt can override image content during refine; contrast rises.
+
+**`refine_pulid_weight`** — float `0.0`–`1.0` &nbsp;·&nbsp; default: `0.0`
+- **`0.0`** → refine ignores identity (fine when `refine_denoise` ≤ 0.25).
+- **`0.3`–`0.6`** → re-asserts the reference face; use when `refine_denoise`
+  ≥ 0.35 has eroded the likeness.
+- **`> 0.7`** → can re-introduce the "pasted" look.
+- Only has an effect on a reference call (needs `pulid_ca` in the model).
+
+**`refine_tile_size`** — integer px, rounded to ÷16 &nbsp;·&nbsp; default: `1024`
+- **`768`** → lowest VRAM, more tiles, more seams to blend.
+- **`1024`** → default balance.
+- **`1152`–`1280`** → fewer tiles, more global coherence, more VRAM per tile.
+- **≥ the image's larger side** → single tile, no seams at all (best if it fits).
+
+**`refine_tile_overlap`** — integer px, capped at `refine_tile_size / 2` &nbsp;·&nbsp; default: `96`
+- **`0`–`32`** → fastest, risk of visible grid seams.
+- **`64`–`128`** → smooth blends (default `96`).
+- **`> 128`** → smoother still but more tiles ⇒ slower, little visible gain.
 
 ### Rules of thumb
 
