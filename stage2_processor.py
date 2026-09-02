@@ -8,7 +8,23 @@ from einops import rearrange, repeat
 sys.path.insert(0, os.path.expanduser("~/PuLID-FLUX"))
 
 import flux.util as flux_util
-flux_util.configs["flux-dev"].ckpt_path = os.path.expanduser("~/FLUX.1-dev/flux1-dev.safetensors")
+
+# Two interchangeable base transformers, both single-file checkpoints in the
+# Black Forest Labs reference format (identical 780-key layout):
+#   dev  — vanilla FLUX.1-dev. The only variant PuLID identity conditioning was
+#          trained against, so it is used whenever a reference image is supplied.
+#   srpo — FLUX.1-dev-SRPO fine-tune (realistic skin/detail). The default when
+#          no reference image is used.
+# Override either path via env if the checkpoints live elsewhere.
+_DEV_CKPT  = os.path.expanduser(
+    os.environ.get("FLUX_CKPT", "~/FLUX.1-dev/flux1-dev.safetensors")
+)
+_SRPO_CKPT = os.path.expanduser(
+    os.environ.get("SRPO_CKPT", "~/SRPO/flux.1-dev-SRPO-BFL-bf16.safetensors")
+)
+CKPT_PATHS = {"dev": _DEV_CKPT, "srpo": _SRPO_CKPT}
+
+flux_util.configs["flux-dev"].ckpt_path = _DEV_CKPT
 flux_util.configs["flux-dev"].ae_path   = os.path.expanduser("~/FLUX.1-dev/ae.safetensors")
 
 from flux.util import load_ae
@@ -41,8 +57,9 @@ def make_img_ids(img):
 class Stage2Processor:
 
     def __init__(self):
-        print("[Stage2] Loading FLUX model...")
-        ckpt_path = flux_util.configs["flux-dev"].ckpt_path
+        ckpt_path = CKPT_PATHS["dev"]
+        self.variant = "dev"   # which checkpoint's weights are currently resident
+        print(f"[Stage2] Loading FLUX model from {ckpt_path} ...")
 
         # Init on meta device (zero VRAM), load checkpoint to CPU,
         # then move to GPU — avoids double-GPU allocation (46GB peak → 23GB peak).
@@ -86,7 +103,42 @@ class Stage2Processor:
             self.pulid.face_helper.face_det.to(DEVICE)
             self.pulid.face_helper.face_parse.to(DEVICE)
 
+    def _ensure_variant(self, use_srpo: bool):
+        """Swap the transformer weights in place when the requested base
+        checkpoint differs from what is currently resident.  Both checkpoints
+        share the exact key layout, so this is a plain state-dict reload; the
+        PuLID cross-attention submodules (``pulid_ca.*``) belong to neither
+        checkpoint and survive the swap untouched."""
+        want = "srpo" if use_srpo else "dev"
+        if want == self.variant:
+            return
+        path = CKPT_PATHS[want]
+        device = next(self.model.parameters()).device
+        print(f"[Stage2] Swapping transformer weights: {self.variant} -> {want}  ({path})")
+
+        sd = load_sft(path, device="cpu")
+        missing, unexpected = self.model.load_state_dict(sd, strict=False, assign=True)
+        del sd
+        gc.collect()
+        torch.cuda.empty_cache()
+
+        # assign=True installs the freshly loaded CPU tensors; move the module
+        # back to the device/dtype it was running on.
+        self.model = self.model.to(dtype=DTYPE, device=device)
+        self.model.eval()
+        gc.collect()
+        torch.cuda.empty_cache()
+
+        stray = [k for k in missing if not k.startswith("pulid_ca")]
+        if stray or unexpected:
+            print(f"[Stage2]   checkpoint key mismatch: {len(stray)} missing "
+                  f"(non-pulid), {len(unexpected)} unexpected")
+        self.variant = want
+        print(f"[Stage2] Now running the '{want}' checkpoint.")
+
     def process(self, embeddings: dict) -> Image.Image:
+        self._ensure_variant(bool(embeddings.get("use_srpo", False)))
+
         txt           = embeddings["txt"].to(DEVICE, dtype=DTYPE)
         vec           = embeddings["vec"].to(DEVICE, dtype=DTYPE)
         txt_ids       = embeddings["txt_ids"].to(DEVICE)
@@ -111,6 +163,7 @@ class Stage2Processor:
 
         #---------------- print out values -------
         print("=========================  Stage 2 values ====================================")
+        print(f"checkpoint:    {self.variant}")
         print(f"txt:           shape={txt.shape}, dtype={txt.dtype}")
         print(f"vec:           shape={vec.shape}, dtype={vec.dtype}")
         print(f"txt_ids:       shape={txt_ids.shape}, dtype={txt_ids.dtype}")

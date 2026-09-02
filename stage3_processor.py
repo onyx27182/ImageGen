@@ -77,9 +77,14 @@ class Stage3Processor:
         if target_h and target_w and image.size != (target_w, target_h):
             image = image.resize((target_w, target_h), Image.LANCZOS)
 
-        strength = float(embeddings.get("refine_denoise", 0.0))
-        if strength > 0.0 and flux_model is not None and ae is not None:
+        do_refine = bool(embeddings.get("do_refine", True))
+        strength  = float(embeddings.get("refine_denoise", 0.0))
+        if do_refine and strength > 0.0 and flux_model is not None and ae is not None:
             image = self._refine(image, embeddings, flux_model, ae, strength)
+        elif do_refine and strength > 0.0:
+            print("[Stage3] refine requested but flux_model/ae not supplied — skipping")
+        else:
+            print(f"[Stage3] refine off (do_refine={do_refine}, refine_denoise={strength})")
 
         return image
 

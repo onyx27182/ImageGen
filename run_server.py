@@ -116,6 +116,13 @@ class ChangeViewResponse(BaseModel):
 
 class GenerateRequest(BaseModel):
     use_reference: bool = True
+    # Base-checkpoint / refine overrides. None => default behaviour:
+    #   use_srpo        -> SRPO fine-tune, unless a reference image is used
+    #                      (PuLID only works against vanilla flux1-dev)
+    #   use_refine_step -> Stage 3 tiled refine pass runs
+    # A non-None value forces that choice regardless of the default.
+    use_srpo: bool | None = None
+    use_refine_step: bool | None = None
     image_b64: str | None = None
     file_hash: str = ""
     prompt: str
@@ -187,6 +194,17 @@ def generate(req: GenerateRequest, x_api_key: str = Header(...)):
     else:
         id_image = None
 
+    # ── resolve checkpoint / refine choice ─────────────────────────────────
+    # A reference image means PuLID identity conditioning, which was trained
+    # against vanilla flux1-dev — so SRPO is off by default in that case.
+    # An explicit flag (True or False) always wins over the default.
+    pulid_used = req.use_reference
+    use_srpo   = (not pulid_used) if req.use_srpo is None else bool(req.use_srpo)
+    use_refine = True if req.use_refine_step is None else bool(req.use_refine_step)
+    print(f"[generate] pulid_used={pulid_used}  "
+          f"use_srpo={use_srpo} (flag={req.use_srpo})  "
+          f"use_refine={use_refine} (flag={req.use_refine_step})")
+
     try:
         with _model_lock:
             _ensure_flux_mode()
@@ -212,10 +230,14 @@ def generate(req: GenerateRequest, x_api_key: str = Header(...)):
             embeddings["id_weight"]           = req.pulid_weight
             embeddings["num_inference_steps"] = req.num_inference_steps
             embeddings["seed"]                = req.seed
+            embeddings["use_srpo"]            = use_srpo
 
             image = stage2.process(embeddings=embeddings)
 
-            embeddings["refine_denoise"]        = req.refine_denoise
+            embeddings["do_refine"]            = use_refine
+            embeddings["refine_denoise"]        = (
+                req.refine_denoise if req.refine_denoise > 0.0 else 0.20
+            ) if use_refine else req.refine_denoise
             embeddings["refine_steps"]          = req.refine_steps
             embeddings["refine_guidance"]       = req.refine_guidance
             embeddings["refine_pulid_weight"]   = req.refine_pulid_weight
