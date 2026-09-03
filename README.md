@@ -8,6 +8,9 @@ requests.
 
 First-time setup — Python deps, the vendored PuLID-FLUX tree, and ~150 GB of
 model weights — is documented step by step in **[INSTALL.md](INSTALL.md)**.
+To set up without identity / reference-image support, use
+**[install_no_pulid.md](install_no_pulid.md)** instead (~125 GB, skips the PuLID
+adapter and EVA-CLIP weights).
 
 Quick version, on a host that already meets the [prerequisites](INSTALL.md#1-host-prerequisites):
 
