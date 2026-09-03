@@ -27,11 +27,39 @@ reference format (identical 780-key layout).
 | Method | Path           | Purpose |
 |--------|----------------|---------|
 | `GET`  | `/`            | Health check |
-| `POST` | `/generate`    | Image generation — Stage 1 (text/face encode) → Stage 2 (FLUX denoise) → Stage 3 (upscale → tiled refine → face-detail pass) |
+| `POST` | `/generate`    | Image generation. Default = SRPO Stage 2 only. Opt-in stages: PuLID (`use_reference`), ESRGAN `upscale`, tiled `use_refine_step`, `face_detail` pass. |
 | `POST` | `/change_view` | Camera-angle change via QwenImageEdit angles LoRA (NDJSON stream) |
 | `POST` | `/dolphin`     | LLM chat (vLLM, lazy-loaded on first call) |
 
 All endpoints require the `X-API-KEY` header.
+
+### Long renders and the proxy timeout
+
+A full render (Stage 2 + `upscale` + refine + face pass, when enabled) can run for
+several minutes.
+Cloudflare, which fronts the `*.thundercompute.net` subdomain, returns
+**`524`** if the origin sends nothing for ~100 s — so a plain blocking `POST`
+that renders inline gets cut off before the image is done.
+
+`/generate` handles this transparently, with **no client changes** (it relies
+only on `requests` following redirects, which it does by default):
+
+1. `POST /generate` validates the request, starts the render on a background
+   thread, and immediately returns **`303 See Other`** → `/generate/wait/{id}`.
+2. `requests` follows that to `GET /generate/wait/{id}`, which waits up to
+   `WAIT_SECONDS` (45 s) for the render.
+3. If the render finished, the wait endpoint returns the **final response** —
+   `200 { "status": "ok", "image": "..." }`, or the real `4xx`/`5xx` with
+   `{ "detail": "..." }` if it failed.
+4. If it is still running, the wait endpoint `303`s back to itself and the
+   client comes round again.
+
+Every HTTP hop is well under the proxy timeout, so `524` never happens. From the
+client's side it is still a single blocking `POST` that returns the true status
+code and body — a failed render is a real error response, at any duration.
+After `MAX_HOPS` (20 ≈ 15 min) the wait endpoint returns `504`.
+
+Tunables in `run_server.py`: `WAIT_SECONDS`, `MAX_HOPS`, `RENDER_TTL`.
 
 ---
 
@@ -39,16 +67,26 @@ All endpoints require the `X-API-KEY` header.
 
 ### Request body
 
+**A bare request — just `prompt` — runs SRPO Stage 2 and nothing else.** Every
+other stage is opt-in:
+
+| Toggle | Type | Default | Turns on |
+|---|---|---|---|
+| `use_srpo`        | bool | **`true`** | SRPO checkpoint. Runs **always** unless you send `false` (→ vanilla flux1-dev). |
+| `use_reference`   | bool | `false` | PuLID face conditioning. Needs `image_b64` + `file_hash`. |
+| `use_refine_step` | bool | `false` | Stage 3 SDEdit refine pass. |
+| `face_detail`     | bool | `false` | Stage 3 face-detail pass. See [when to use it](#when-to-use-the-face-pass). |
+| `upscale`         | int `0`–`4` | `1` | ESRGAN supersample + tiled refine (`2`+). |
+
+Everything else is a tuning parameter:
+
 | Field                 | Type          | Default | Notes |
 |-----------------------|---------------|---------|-------|
 | `prompt`              | str           | *(required)* | Text prompt |
-| `use_reference`       | bool          | `true`  | Send a face image to preserve identity (PuLID). See below. |
 | `image_b64`           | str \| null   | `null`  | Base64 PNG/JPEG of the reference face. Required when `use_reference=true`. |
 | `file_hash`           | str           | `""`    | Stable key for the reference image; used to cache the face embedding. Required when `use_reference=true`. |
-| `use_srpo`            | bool \| null  | `null`  | Base-checkpoint override. `null` = auto. See [Checkpoint selection](#checkpoint-selection). |
-| `use_refine_step`     | bool \| null  | `null`  | Stage 3 refine override. `null` = auto (on). See [The refine step](#the-refine-step). |
-| `height`              | int           | `1024`  | Final output height. FLUX is trained at 1024; smaller is draft quality. `1080x1920` is generated at half and upscaled. |
-| `width`               | int           | `1024`  | Final output width. |
+| `height`              | int           | `1024`  | Base output height. FLUX is trained at 1024; smaller is draft quality. `1080x1920` is generated at half and upscaled. With `upscale>=2` the returned image is `height × upscale`. |
+| `width`               | int           | `1024`  | Base output width (see `height`). |
 | `guidance_scale`      | float         | `4.0`   | Stage 2 guidance ("fake CFG"). |
 | `num_inference_steps` | int           | `28`    | Stage 2 denoise steps. |
 | `seed`                | int           | `0`     | RNG seed. |
@@ -61,8 +99,7 @@ All endpoints require the `X-API-KEY` header.
 | `refine_pulid_weight` | float         | `0.0`   | Identity strength during the tiled refine (`0` = off). |
 | `refine_tile_size`    | int           | `1024`  | Refine tile size (px, rounded to /16). Keep ≥ 1024 for FLUX. |
 | `refine_tile_overlap` | int           | `96`    | Refine tile overlap (px, feathered). |
-| `upscale`             | int           | `1`     | ESRGAN factor applied before refine. `1` = none (refine at native res), `2` = supersample, `0` = also none. |
-| `face_detail`         | bool          | `true`  | Run the face-detail pass (detect → crop → SDEdit at ~1024 → paste back). Fixes small features (eyes, teeth). |
+| `upscale`             | int (`0`–`4`) | `1`     | ESRGAN factor before refine. `1`/`0` = none. `2`–`4` = supersample + **tiled** refine, image returned at `gen_size × upscale` (no downscale). `4` from 1024 = 4096² / ~25 tiles / minutes. `>4` → `422`. |
 | `face_denoise`        | float         | `0.40`  | Face-pass SDEdit strength. `0` disables the pass. |
 | `face_pulid_weight`   | float \| null | `null`  | Identity strength in the face pass. `null` = `0.5` on reference calls, `0` otherwise. |
 | `face_pad`            | float         | `0.40`  | Fraction of the face bbox added as padding before the crop. |
@@ -75,6 +112,12 @@ All endpoints require the `X-API-KEY` header.
 { "status": "ok", "image": "<base64 PNG>" }
 ```
 
+One blocking call. Internally it is delivered via a `303` redirect chain so long
+renders survive the proxy timeout — see
+[Long renders and the proxy timeout](#long-renders-and-the-proxy-timeout). The
+client only needs to follow redirects (the default) and use a read timeout
+longer than `WAIT_SECONDS` (or none).
+
 ---
 
 ## Checkpoint selection
@@ -82,11 +125,12 @@ All endpoints require the `X-API-KEY` header.
 Stage 2 runs on one of two interchangeable base transformers, chosen **per
 request**:
 
-- **`srpo`** — `FLUX.1-dev-SRPO` fine-tune. Realistic skin and detail. This is
-  the default for plain text-to-image.
-- **`dev`** — vanilla `FLUX.1-dev`. This is the only checkpoint PuLID identity
-  conditioning was trained against, so it is used whenever a reference face is
-  supplied.
+- **`srpo`** — `FLUX.1-dev-SRPO` fine-tune. Realistic skin and detail. **This is
+  the default for every call**, reference or not.
+- **`dev`** — vanilla `FLUX.1-dev`. Only used when `use_srpo` is explicitly sent
+  as `false`. PuLID identity conditioning was trained against `dev`, so a
+  reference call gets slightly stronger likeness on `dev` — send `use_srpo:
+  false` if likeness matters more than SRPO's skin/detail rendering.
 
 ### Reference vs no-reference
 
@@ -96,40 +140,32 @@ request**:
 - **No-reference call** — `use_reference: false`, no face image. Face
   processing and PuLID are skipped; Stage 2 is plain text-to-image.
 
-### `use_srpo` / `use_refine_step`
+### The four toggles
 
-Both are three-state (`true` / `false` / omitted):
+Plain booleans. A bare request runs **SRPO Stage 2 only**.
 
-- **omitted (`null`)** — automatic default behaviour (see chart).
-- **`true` or `false`** — forces that choice and always overrides the default.
+| `use_srpo` | `use_reference` | `use_refine_step` | `face_detail` | Result |
+|---|---|---|---|---|
+| *(omit)* | *(omit)* | *(omit)* | *(omit)* | **SRPO, Stage 2 only** |
+| `false` | — | — | — | vanilla flux1-dev, Stage 2 only |
+| — | `true` | — | — | SRPO **+ PuLID** (needs `image_b64`+`file_hash`) |
+| `false` | `true` | — | — | flux1-dev + PuLID *(strongest likeness — PuLID was trained on dev)* |
+| — | — | `true` | — | SRPO + Stage 3 refine |
+| — | — | — | `true` | SRPO + face-detail pass |
 
-`use_srpo: true` on a reference call loads **SRPO *and* applies PuLID**. Identity
-fidelity is weaker in that combination (PuLID was not trained against SRPO), but
-the explicit flag is honoured.
+Combine freely. `upscale >= 2` additionally turns on the ESRGAN supersample and
+makes the refine genuinely tiled.
 
-### Decision chart
-
-| Reference image? | `use_srpo` | `use_refine_step` | Base checkpoint        | Refine |
-|------------------|------------|-------------------|------------------------|--------|
-| no               | *(omitted)* | *(omitted)*      | **SRPO**               | on     |
-| yes              | *(omitted)* | *(omitted)*      | **flux1-dev** + PuLID  | on     |
-| yes              | `true`     | —                 | **SRPO** + PuLID       | on     |
-| no               | `false`    | —                 | **flux1-dev**          | on     |
-| any              | —          | `false`           | *(as above)*           | **off** |
-| any              | —          | `true`            | *(as above)*           | on     |
-
-Resolution logic (in `run_server.generate()`):
+Resolution logic (`run_server._run_generate()`):
 
 ```python
-pulid_used = req.use_reference
-use_srpo   = (not pulid_used) if req.use_srpo is None else bool(req.use_srpo)
-use_refine = True             if req.use_refine_step is None else bool(req.use_refine_step)
+pulid_used = bool(req.use_reference)
+use_srpo   = bool(req.use_srpo)          # default True
+use_refine = bool(req.use_refine_step)   # default False
 face_pw    = (0.5 if pulid_used else 0.0) if req.face_pulid_weight is None \
              else float(req.face_pulid_weight)
+# req.face_detail (default False) flows straight through to Stage 3
 ```
-
-The face-detail pass (`face_detail`, default on) is independent of all of the
-above — it runs on the final image regardless of checkpoint or refine choice.
 
 ### Swap cost
 
@@ -145,21 +181,27 @@ calls — to avoid reloading the checkpoint on every request.
 
 ## Stage 3 — upscale, refine, face pass
 
-Stage 3 runs three steps **in this order**, all before the final resize to the
-requested output size:
+Stage 3 has three steps, **each independently gated** — a default request skips
+all of them. When enabled, they run in this order:
 
 1. **ESRGAN upscale** — only if `upscale` is 2–4. `upscale=1` (default) skips it
    and everything below runs at the Stage 2 native resolution.
-2. **Tiled SDEdit refine** — a low-denoise pass back through the Stage 2 FLUX
-   model + VAE, tiled (`refine_tile_size` / `refine_tile_overlap`, feathered
-   blend). Adds coherent micro-detail (hair, fabric, pores). Runs on the
-   *upscaled* image, before any downscale, so features span enough pixels for
-   the tiler to actually engage.
-3. **Face-detail pass** (ADetailer-style) — detect the face, crop it with
-   `face_pad` padding, resize the crop to ~1024 px, SDEdit it at `face_denoise`
-   (with PuLID re-applied at `face_pulid_weight` on reference calls), resize
-   back, paste through a feathered mask. This is the **last** diffusion step, so
-   nothing re-warps the face afterwards.
+2. **SDEdit refine** — only if `use_refine_step: true`. A low-denoise pass back
+   through the Stage 2 FLUX model + VAE. **It only *tiles* when the image is
+   larger than one tile**
+   (`refine_tile_size`, default 1024) — i.e. only after an `upscale >= 2`. At
+   `upscale=1` the image is 1024 and the refine is a single full-frame pass, not
+   a tiled one. Adds coherent micro-detail (hair, fabric, pores).
+3. **Face-detail pass** (ADetailer-style) — only if `face_detail: true`. Detect
+   the face, crop it (+`face_pad`), scale the crop to ~1024 px, SDEdit it at
+   `face_denoise`, scale back, paste through a feathered mask. Overall image size
+   is unchanged. This is the **last** diffusion step, so nothing re-warps the
+   face afterwards. Full mechanism: [What the face pass does](#what-the-face-pass-does).
+
+**The output is returned at the resolution steps 2–3 ran at.** With `upscale >= 2`
+you get the full supersampled image back (e.g. `1024` request + `upscale=2` → a
+`2048` PNG); it is **not** downscaled to `height`/`width`, because that would
+throw the refine detail straight back out.
 
 Why the face pass exists: a whole-image refine cannot reliably rebuild a
 ~40 px iris — the model needs the feature at roughly native resolution. Step 3
@@ -167,30 +209,77 @@ gives every face ~1024 px to work with, which is what fixes warped eyes / teeth.
 Order 2→3 also matters: refine before face pass, so the tiled refine never
 touches the corrected face.
 
-**Refine (step 2)** runs when `use_refine_step` is not `false`, `refine_denoise
-> 0` (bumped to `0.25` if forced on at 0), and the Stage 2 model/VAE are passed
-in. It uses whichever checkpoint Stage 2 just ran with.
+**Refine (step 2)** runs only when `use_refine_step: true` is sent (`refine_denoise`
+then bumped to `0.25` if it was left at 0). It uses whichever checkpoint Stage 2
+ran with.
 
-**Face pass (step 3)** runs when `face_detail` is `true`, `face_denoise > 0`, a
-face is detected, and the model/VAE are available. Detector: InsightFace
-`antelopev2` (detection only), lazy-loaded, CPU.
+**Face pass (step 3)** runs only when `face_detail: true` is sent, `face_denoise
+> 0`, and a face is detected. Detector: InsightFace `antelopev2` (detection only),
+lazy-loaded, CPU.
 
-### Best-practice reference pipeline
+#### What the face pass does
 
-Matches current community practice (ADetailer, Ultimate SD Upscale, PuLID docs):
+Per detected face (`Stage3Processor._face_pass`), on the image as it stands after
+step 2:
 
-```
-base gen        1024 native, dev+PuLID, guidance 4, num_start_step 4, true_cfg 1
-tiled refine    @ working res, 1024 tiles, denoise 0.2–0.35   (SRPO ok here)
-face pass       crop → ~1024 → denoise ~0.4, PuLID ~0.5       ← fixes eyes
-output          = the resolution refined at; never up-then-downscale to a
-                  smaller size expecting the refine detail to survive
-```
+1. **Detect** — InsightFace `antelopev2` (detection only, CPU, `det_size 640`)
+   returns face bounding boxes. No face → the image is returned unchanged. Up to
+   `face_max` (2) faces, largest first.
+2. **Crop** — take the bbox, expand it by `face_pad` (0.40 ⇒ +40 % on each side),
+   clamp to the image, round the crop to ÷16. This crop is at the image's
+   **native pixels** — call it `cw × ch`.
+3. **Scale the crop to the work size** — `scale = face_work_size / max(cw, ch)`
+   (`face_work_size` default 1024), **LANCZOS**. So the crop's long side becomes
+   ~1024 px. If the face was **smaller** than that, this is an **upscale** (and
+   the point of the whole pass). If the face was **larger** (a tight portrait),
+   this is a **downscale**.
+4. **Re-diffuse the scaled crop** — the same partial SDEdit as the refine
+   (`_refine_tile`): VAE-encode → re-noise to `face_denoise` (0.40) → run the
+   `face_steps` (30) schedule ≈ 12 actual denoise steps through the FLUX
+   transformer, conditioned on the text prompt, plus PuLID identity if
+   `face_pulid_weight > 0`.
+5. **Scale back** to `cw × ch`, LANCZOS.
+6. **Paste** into the image through a Gaussian-feathered rectangular mask
+   (feather ≈ `min(cw, ch) / 8`).
 
-For a bigger deliverable, either request a larger `height`/`width` directly or
-set `upscale=2` (supersample: ESRGAN ×2 → refine at 2× → downscale to target).
-For hero shots the field uses a dedicated upscaler (SUPIR / Gigapixel) instead
-of ESRGAN — not wired in here.
+The **overall image dimensions never change** — only the face region is
+replaced, in place. Consequence: on a large face the crop makes a
+downscale → re-diffuse → upscale round-trip that **loses** detail; it only adds
+detail when step 3 is a real upscale.
+
+#### When to use the face pass
+
+It only helps when the detected face is **small relative to the work resolution**,
+so that cropping it and scaling to ~1024 px is a real upscale that gives the model
+pixels to rebuild irises / teeth / nostrils.
+
+| Situation | `face_detail` | Why |
+|---|---|---|
+| Full-body, wide, or group shot — face is a small part of the frame | **`true`** | The crop→1024 step is a genuine upscale; fixes warped small features. |
+| After `upscale >= 2` | **`true`** | Same — the face crop gets a proper high-res redo. |
+| Tight portrait at native 1024, no upscale | **`false`** | The face already fills the frame, so the crop is already ~1024 — no resolution gained. You get a marginal eye sharpen plus a **paste-seam risk**: the feathered crop boundary can show as a faint ring on flat skin (foreheads), and it slightly smooths skin texture. |
+| You are chasing skin texture | **`false`** | The pass re-diffuses the face and pulls it toward FLUX's smooth-skin prior. |
+
+If you do run it on a close portrait, drop `face_pad` to ~`0.2` so the crop hugs
+the face and the blend edge stays off open skin.
+
+### Recipes
+
+**Cleanest skin (default):** just `prompt`. SRPO Stage 2, 1024, nothing else.
+Add `guidance_scale: 3.5`, `num_inference_steps: 50` (SRPO's own recommended
+settings) and skin-texture words in the prompt for the best result.
+
+**Face swap:** `use_reference: true` + `image_b64` + `file_hash`. Optionally
+`use_srpo: false` for the strongest likeness (PuLID was trained on dev).
+
+**Crisp large deliverable:** `upscale: 2` + `use_refine_step: true` → ESRGAN ×2,
+genuinely tiled 1024 refine at 2048, `2048` PNG returned (no downscale).
+
+**Small / distant face with warped eyes:** `face_detail: true` (see
+[when to use it](#when-to-use-the-face-pass)).
+
+For hero shots the field uses a dedicated upscaler (SUPIR / Gigapixel) instead of
+ESRGAN — not wired in here.
 
 ---
 
@@ -202,33 +291,48 @@ tuned for a good general result; adjust one knob at a time.
 
 ### Pipeline selection
 
-**`use_srpo`** — `true` / `false` / omit &nbsp;·&nbsp; default: omit (auto)
-- **omit** → auto: SRPO when there is no reference image, flux1-dev when there is.
-- **`true`** → always SRPO. Realistic skin, pores, micro-contrast. Use for
-  non-face images or when a loose likeness is acceptable.
-- **`false`** → always flux1-dev. Required for a strong PuLID likeness; look is
-  cleaner and slightly flatter.
+**`use_srpo`** — bool &nbsp;·&nbsp; default: **`true`**
+- **`true` / omit** → SRPO, on **every** call. Realistic skin, pores,
+  micro-contrast. On a reference call PuLID runs on top of it.
+- **`false`** → vanilla flux1-dev. Gives PuLID its strongest likeness (PuLID was
+  trained on `dev`); look is cleaner and slightly flatter.
 
-**`use_refine_step`** — `true` / `false` / omit &nbsp;·&nbsp; default: omit (on)
-- **omit / `true`** → run the Stage 3 tiled refine. Adds coherent micro-detail.
-- **`false`** → skip refine (ESRGAN + face pass only). Faster.
+**`use_reference`** — bool &nbsp;·&nbsp; default: `false`
+- **`true`** → PuLID face conditioning; requires `image_b64` + `file_hash`.
+- **`false` / omit** → plain text-to-image.
 
-**`face_detail`** — `true` / `false` &nbsp;·&nbsp; default: `true`
-- **`true`** → run the face-detail pass. Keeps eyes/teeth/nostrils correct;
-  costs one ~1024 px SDEdit per face (~5–10 s).
-- **`false`** → skip it. Only do this for non-portrait images, or when the base
-  face is already clean and you want maximum speed.
+**`use_refine_step`** — bool &nbsp;·&nbsp; default: `false`
+- **`true`** → run the Stage 3 refine pass. It only *tiles* at `upscale >= 2`; at
+  `upscale=1` it's a single full-frame pass that tends to **smooth skin** (it
+  re-diffuses toward FLUX's smooth prior).
+- **`false` / omit** → skip it.
+
+**`face_detail`** — bool &nbsp;·&nbsp; default: `false`
+- **`true`** → run the face-detail pass (one ~1024 px SDEdit per face, ~5–10 s).
+  Worth it only when the face is **small in frame** or after `upscale >= 2`.
+- **`false` / omit** → skip it. Correct for a **tight portrait at native 1024** —
+  the face is already ~1024 px so the pass adds nothing but a paste-seam risk and
+  slight skin smoothing.
+- Full guidance: [When to use the face pass](#when-to-use-the-face-pass).
 
 **`upscale`** — integer, use `0`/`1` or `2`–`4` &nbsp;·&nbsp; default: `1`
-- **`0` / `1`** → no ESRGAN; refine and face pass run at the Stage 2 native
-  resolution, output is that resolution. This is the default and is correct for
-  a 1024 request.
-- **`2`** → supersample: ESRGAN ×2 → refine at 2× → downscale to `height`/`width`.
-  Crisper, ~2× the Stage 3 cost.
-- **`3`–`4`** → bigger still; `4` is the ESRGAN model's native factor.
-- **`>4`** → unsupported by the model; just a blurry resize. Don't.
-- To get a genuinely larger *output*, raise `height`/`width` instead of relying
-  on `upscale` — the result is resized to `height`/`width` at the very end.
+- **`0` / `1`** → no ESRGAN; refine is a **single full-frame pass** (not tiled)
+  and the output is the Stage 2 native resolution. Fine for a plain 1024 request,
+  but the refine is doing less here than the word "tiled" suggests.
+- **`2`** → ESRGAN ×2, then a genuinely **tiled** 1024 refine at 2×, then the
+  face pass — and the **`2048` image is returned as-is**, no downscale. Crisper,
+  ~2× the Stage 3 cost. Use this when you want the full refined result.
+- **`3`** → ESRGAN ×3, refine tiled at 3072 (~16 tiles), output `gen_size × 3`.
+- **`4`** → the ESRGAN model's native factor. From a 1024 request: a **4096×4096**
+  output, **~25 refine tiles**, several minutes, and a PNG in the tens of MB
+  (base64 in the JSON body). More tiles also means more seam-blend surface, so
+  it is not automatically "better" than `2` — use it only when you actually need
+  a 4K deliverable.
+- **`>4`** → rejected (`422`). It would only be a blurry `cv2` resize on top of
+  the ×4 network.
+
+For most work `2` is the sweet spot: real tiled refine, 2048 out, manageable
+cost and payload.
 
 ### Base generation — Stage 2
 
@@ -253,8 +357,9 @@ tuned for a good general result; adjust one knob at a time.
 - **`1024`** → default; the resolution FLUX was trained at.
 - **`1152`–`1536`** → sharper/bigger, slower, more VRAM, some OOM risk.
 - **`1080×1920`** (portrait) → special-cased: generated at `540×960`, then
-  upscaled to reach the target.
-- This is the **final output size** — Stage 3 fits the result to it last.
+  ESRGAN-upscaled ×2 to reach the target.
+- This is the **base output size**. With `upscale >= 2` the returned image is
+  `height × upscale` / `width × upscale` — Stage 3 does **not** shrink it back.
 - Non-multiples of 16 are rounded down.
 
 ### Identity / PuLID — reference calls only
@@ -356,23 +461,26 @@ Actual Euler steps executed ≈ `round(refine_steps × refine_denoise)`.
 
 ### Rules of thumb
 
-- **Warped / mismatched eyes** → make sure `face_detail: true` (default) and
-  `height` ≥ 1024. Raise `face_denoise` to `0.45`.
-- **Face pass changed the likeness** → raise `face_pulid_weight` to `0.6`, or
-  lower `face_denoise` to `0.3`.
-- **Visible edge around the face after the pass** → raise `face_pad` to `0.55`.
-- **Face looks pasted on / wrong lighting** → lower `pulid_weight` to ~0.8, or
-  raise `num_start_step` to `4`–`6`.
-- **Likeness lost after the tiled refine** → lower `refine_denoise`, or set
-  `refine_pulid_weight` to ~0.5.
-- **Output too soft** → raise `refine_denoise` to ~0.3, raise
-  `num_inference_steps`, or set `upscale: 2`.
-- **Skin looks plasticky** → `use_srpo: true` (drop the reference image, or
-  accept weaker likeness).
+- **Warped / mismatched eyes** on a small or distant face → `face_detail: true`
+  (off by default), `height` ≥ 1024, `face_denoise` ~`0.45`. If the face is
+  already large in frame this won't help — see
+  [when to use the face pass](#when-to-use-the-face-pass).
+- **Visible ring around the face after the pass** → drop `face_pad` to ~`0.2`, or
+  turn `face_detail` back off.
+- **Face looks pasted on / wrong lighting** (reference call) → lower
+  `pulid_weight` to ~0.8, or raise `num_start_step` to `4`–`6`.
+- **Skin looks plasticky / waxy** → the default (SRPO Stage 2 only) already gives
+  the most texture. Do **not** turn on `use_refine_step` or `face_detail` — both
+  re-diffuse toward FLUX's smooth prior. Lower `guidance_scale` to ~3.0, raise
+  `num_inference_steps` to 50, and put skin-texture words in the prompt. Residual
+  highlight waxiness is FLUX-family baseline.
+- **Output too soft / low-res** → `upscale: 2` + `use_refine_step: true` → the
+  full tiled-refined `2048` PNG.
 - **Visible grid seams after refine** → raise `refine_tile_overlap`, or raise
   `refine_tile_size` so the image fits in one tile.
-- **Too slow** → `face_detail: false` and/or `use_refine_step: false`, drop
-  `num_inference_steps` to ~22, keep `height`/`width` at 1024 and `upscale` at 1.
+- **Too slow** → the default (SRPO Stage 2 only) is already the fast path; drop
+  `num_inference_steps` to ~22 and don't enable `upscale` / `use_refine_step` /
+  `face_detail`.
 
 ## Other endpoints
 
