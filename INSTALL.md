@@ -59,6 +59,22 @@ pip install -r requirements.txt \
     --extra-index-url https://download.pytorch.org/whl/cu130
 ```
 
+**Windows (PowerShell)** — do not copy the `~/…` form; PowerShell does not expand
+`~` inside a quoted or mid-token path and `venv` will create a literal `~` folder,
+leaving `pip.exe` pointing at a path that does not exist. Use an explicit path and
+call pip through `python -m`:
+
+```powershell
+# from the repo root; py -3.12 selects the 3.12 interpreter
+py -3.12 -m venv .venvs\imagegen
+.\.venvs\imagegen\Scripts\Activate.ps1
+
+# if activation is blocked: Set-ExecutionPolicy -Scope Process RemoteSigned
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt `
+    --extra-index-url https://download.pytorch.org/whl/cu130
+```
+
 `--extra-index-url` is mandatory: `torch==2.11.0+cu130` / `torchvision==0.26.0+cu130`
 are not on PyPI.
 
