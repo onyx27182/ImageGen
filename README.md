@@ -4,6 +4,23 @@ Multi-model FastAPI image-generation server. One GPU (A100 80GB); only one
 pipeline is resident on the GPU at a time and models are hot-swapped between
 requests.
 
+## Installation
+
+First-time setup — Python deps, the vendored PuLID-FLUX tree, and ~150 GB of
+model weights — is documented step by step in **[INSTALL.md](INSTALL.md)**.
+
+Quick version, on a host that already meets the [prerequisites](INSTALL.md#1-host-prerequisites):
+
+```bash
+pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu130
+```
+
+- `requirements.txt` — curated, pinned deps the server imports.
+- `requirements.lock.txt` — full `pip freeze` for a byte-exact environment clone.
+
+The `--extra-index-url` is required: the pinned `torch`/`torchvision` are CUDA
+13.0 builds that are not on PyPI. `pip` alone will not resolve them.
+
 ## Running
 
 ```bash
